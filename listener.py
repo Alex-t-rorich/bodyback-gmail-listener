@@ -74,6 +74,8 @@ pubsub_credentials = service_account.Credentials.from_service_account_file(
 subscriber = pubsub_v1.SubscriberClient(credentials=pubsub_credentials)
 subscription_path = subscriber.subscription_path(project_id, subscription_id)
 
+print(f"🔗 Pub/Sub subscription path: {subscription_path}")
+
 # Setup Gmail API
 def get_gmail_service():
     """Get Gmail API service using OAuth credentials."""
@@ -192,35 +194,79 @@ def process_watched_email(email_content):
     body_logger.info(f"BODY_END")
     body_logger.info("="*80)
     
-    # Check if already processed
+    # Check if already processed (double-check)
     if not db.email_already_processed(email_content['id']):
         user_id = db.save_lead(email_content, email_type)
         if user_id:
-            print(f"✅ {email_type.upper()} - Saved lead from {email_content['from']} (User ID: {user_id})")
+            print(f"✅ SUCCESS {email_type.upper()} - Saved lead from {email_content['from']} (User ID: {user_id})")
         else:
-            error_logger.error(f"Failed to save lead: {email_content['subject']}")
+            print(f"⚠️  SKIPPED {email_type.upper()} - Invalid data from {email_content['from']}")
+            # Changed from ERROR to INFO - this is expected behavior, not an error
+            body_logger.info(f"SKIPPED {email_type} - Invalid data format: {email_content['subject']}")
     else:
-        print(f"⏭️  {email_type.upper()} - Already processed, skipping")
-
+        print(f"🔄 DUPLICATE {email_type.upper()} - Already processed, skipping")
+        body_logger.info(f"DUPLICATE {email_type} - Already processed: {email_content['subject']}")
+             
 def process_message(message):
     """Process incoming Pub/Sub message from Gmail."""
+    print(f"📨 PUB/SUB MESSAGE RECEIVED! Raw data: {message.data}")
+    
     try:
-        # Just check the most recent email
-        if gmail_service:
+        # Decode the message data
+        message_data = json.loads(message.data.decode('utf-8'))
+        print(f"📧 Decoded message: {message_data}")
+        
+        # Extract email address and history ID
+        email_address = message_data.get('emailAddress')
+        history_id = message_data.get('historyId')
+        
+        print(f"📬 Email: {email_address}")
+        print(f"📊 History ID: {history_id}")
+        
+        if gmail_service and email_address:
+            print("🔍 Checking recent emails...")
+            
+            # Get recent messages (last 5)
             recent_messages = gmail_service.users().messages().list(
                 userId='me',
-                maxResults=1
+                maxResults=5,
+                labelIds=['INBOX']
             ).execute()
             
             if 'messages' in recent_messages:
-                msg = recent_messages['messages'][0]
-                email_content = get_email_content(msg['id'])
+                print(f"📬 Found {len(recent_messages['messages'])} recent emails")
                 
-                if email_content and email_content['email_type']:
-                    process_watched_email(email_content)
-                # No logging for ignored emails - keeps it clean
+                # Check each recent email
+                for msg in recent_messages['messages']:
+                    print(f"🔍 Checking email ID: {msg['id']}")
+                    
+                    # Skip if already processed
+                    if db.email_already_processed(msg['id']):
+                        print(f"⏭️  Email {msg['id']} already processed - skipping")
+                        continue
+                    
+                    email_content = get_email_content(msg['id'])
+                    
+                    if email_content:
+                        print(f"📋 Subject: {email_content['subject']}")
+                        print(f"📋 From: {email_content['from']}")
+                        print(f"📋 Email type: {email_content['email_type']}")
+                        
+                        if email_content['email_type']:
+                            print(f"🎯 MATCHED WATCHED EMAIL TYPE: {email_content['email_type']}")
+                            process_watched_email(email_content)
+                            break  # Process only the first matching email
+                        else:
+                            print("⏭️  Email type not watched - checking next email")
+                    else:
+                        print(f"❌ Failed to get content for email {msg['id']}")
+            else:
+                print("📭 No recent messages found")
+        else:
+            print("❌ Gmail service not available or no email address in message")
             
     except Exception as e:
+        print(f"❌ Error in process_message: {e}")
         error_logger.error(f"Error in process_message: {e}")
         import traceback
         error_logger.error(traceback.format_exc())
@@ -228,13 +274,17 @@ def process_message(message):
     try:
         # Acknowledge the message
         message.ack()
+        print("✅ Message acknowledged")
     except Exception as e:
+        print(f"❌ Error acknowledging message: {e}")
         error_logger.error(f"Error acknowledging message: {e}")
 
 # Set up the subscription
+print(f"🔄 Setting up Pub/Sub subscription...")
 streaming_pull_future = subscriber.subscribe(
     subscription_path, callback=process_message
 )
+print(f"🎯 Pub/Sub subscription active!")
 
 print(f"✅ Database connected")
 print(f"📧 Watching for: NEW M LEAD, Home page, Packages page")
@@ -247,6 +297,7 @@ print("Press Ctrl+C to stop\n")
 try:
     while True:
         time.sleep(60)
+        print(f"⏰ Still listening... {datetime.now().strftime('%H:%M:%S')}")
 except KeyboardInterrupt:
     streaming_pull_future.cancel()
     print("\n🛑 Stopped")
