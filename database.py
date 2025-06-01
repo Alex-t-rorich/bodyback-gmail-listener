@@ -68,23 +68,17 @@ class BodyBackDB:
         data = {}
         
         if len(lines) >= 4:
-            # Line 1: Name
             data['name'] = lines[0]
             
-            # Line 2: Phone
             data['phone'] = lines[1]
             
-            # Line 3: Email  
             data['email'] = lines[2]
             
-            # Line 4: Location
             data['location'] = lines[3]
             
-            # Everything else goes into customer_data
             remaining_lines = lines[4:]
             data['customer_data'] = '\n'.join(remaining_lines)
         else:
-            # Fallback if format is different
             data['name'] = lines[0] if lines else ''
             data['phone'] = ''
             data['email'] = ''
@@ -97,7 +91,7 @@ class BodyBackDB:
         """Clean extracted text by removing extra whitespace and formatting."""
         if not text:
             return ''
-        # Remove extra whitespace and newlines
+
         cleaned = re.sub(r'\s+', ' ', text.strip())
         return cleaned
     
@@ -105,15 +99,13 @@ class BodyBackDB:
         """Parse SA Home/Packages page contact form with improved regex patterns."""
         data = {}
         
-        # Clean the email body first - remove excessive whitespace but keep structure
         cleaned_body = re.sub(r'\n\s*\n', '\n', email_body)
         
-        # Extract name - more flexible pattern that handles HTML formatting
         name_patterns = [
-            r'Name and Surname\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([A-Z][A-Z\s]+)',  # Pattern for your example
-            r'\*?Name and Surname\*?\s*\n+\s*([^\n]+)',  # Alternative pattern
-            r'Name and Surname\*?\s*([^\n\r]+)',  # Simple pattern
-            r'Name.*?\n+\s*([A-Z][A-Z\s]+)'  # Even more flexible
+            r'Name and Surname\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([A-Z][A-Z\s]+)',
+            r'\*?Name and Surname\*?\s*\n+\s*([^\n]+)',
+            r'Name and Surname\*?\s*([^\n\r]+)',
+            r'Name.*?\n+\s*([A-Z][A-Z\s]+)'
         ]
         
         for pattern in name_patterns:
@@ -125,12 +117,11 @@ class BodyBackDB:
         if 'name' not in data:
             data['name'] = ''
         
-        # Extract phone - look for 10 digit numbers
         phone_patterns = [
-            r'Number \(10 digits\)\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*(\d{10})',  # Pattern for your example
-            r'\*?Number.*?\*?\s*\n+\s*([0-9]+)',  # Alternative pattern
-            r'Number.*?(\d{10})',  # Simple 10-digit pattern
-            r'(\d{10})'  # Just find any 10-digit number
+            r'Number \(10 digits\)\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*(\d{10})',
+            r'\*?Number.*?\*?\s*\n+\s*([0-9]+)',
+            r'Number.*?(\d{10})',
+            r'(\d{10})'
         ]
         
         for pattern in phone_patterns:
@@ -142,12 +133,11 @@ class BodyBackDB:
         if 'phone' not in data:
             data['phone'] = ''
         
-        # Extract location
         location_patterns = [
-            r'Location\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+)',  # Pattern for your example
-            r'\*?Location\*?\s*\n+\s*([^\n]+)',  # Alternative pattern  
-            r'Location\*?\s*([^\n\r]+)',  # Simple pattern
-            r'Location.*?\n+\s*([A-Za-z\s]+)'  # Flexible pattern
+            r'Location\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+)',
+            r'\*?Location\*?\s*\n+\s*([^\n]+)',
+            r'Location\*?\s*([^\n\r]+)',
+            r'Location.*?\n+\s*([A-Za-z\s]+)'
         ]
         
         for pattern in location_patterns:
@@ -159,12 +149,11 @@ class BodyBackDB:
         if 'location' not in data:
             data['location'] = ''
         
-        # Extract goals/details
         goals_patterns = [
-            r'Goals, injuries & other details\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*Date:|$)',  # Pattern for your example
-            r'\*?Goals, injuries & other details\*?\s*\n+\s*([^\n\r]+)',  # Alternative pattern
-            r'Goals.*?details.*?\s*([^\n\r]+)',  # Simple pattern
-            r'Goals.*?\n+\s*([^Date:]+)'  # Everything until Date:
+            r'Goals, injuries & other details\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*Date:|$)',
+            r'\*?Goals, injuries & other details\*?\s*\n+\s*([^\n\r]+)',
+            r'Goals.*?details.*?\s*([^\n\r]+)',
+            r'Goals.*?\n+\s*([^Date:]+)'
         ]
         
         for pattern in goals_patterns:
@@ -176,7 +165,6 @@ class BodyBackDB:
         if 'customer_data' not in data:
             data['customer_data'] = ''
         
-        # Log what we extracted for debugging
         db_logger.info(f"Extracted data: Name='{data.get('name')}', Phone='{data.get('phone')}', Location='{data.get('location')}', Data='{data.get('customer_data')}'")
         
         return data
@@ -195,39 +183,35 @@ class BodyBackDB:
     def save_lead(self, email_content, email_type):
         """Save any type of lead to database."""
         try:
-            # Parse based on email type
             if email_type == 'new_lead':
                 parsed_data = self.parse_new_lead(email_content['body'])
-            else:  # home_page or packages_page
+            else:
                 parsed_data = self.parse_contact_form(email_content['body'])
             
-            # Split name
             first_name, last_name = self.split_name(parsed_data.get('name', ''))
             
             db_logger.info(f"Saving {email_type} lead: {first_name} {last_name} - {parsed_data.get('email', 'no email')}")
             
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Insert into users table first
                     cur.execute("""
                         INSERT INTO users (email, password_hash, first_name, last_name, phone_number, location, roles, active)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (
                         parsed_data.get('email', ''),
-                        'lead_no_password',  # Placeholder for leads
+                        'lead_no_password',
                         first_name,
                         last_name,
                         parsed_data.get('phone', ''),
                         parsed_data.get('location', ''),
-                        ['lead'],  # Role as lead
-                        True  # Active by default
+                        ['Customer'],
+                        False
                     ))
                     
                     user_id = cur.fetchone()['id']
                     db_logger.info(f"Created user with ID: {user_id}")
                     
-                    # Prepare profile data for customers table
                     profile_data = {
                         'gmail_id': email_content['id'],
                         'source': email_type,
@@ -239,7 +223,6 @@ class BodyBackDB:
                         'processed_at': datetime.now().isoformat()
                     }
                     
-                    # Insert into customers table
                     cur.execute("""
                         INSERT INTO customers (user_id, profile_data)
                         VALUES (%s, %s)
