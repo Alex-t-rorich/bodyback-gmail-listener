@@ -80,6 +80,44 @@ class EmailProcessor:
         except Exception as e:
             error_logger.error(f"Error checking if email processed: {e}")
             return False
+    
+    def lead_already_exists(self, parsed_data, email_type):
+        """Check if lead already exists based on phone number for contact forms."""
+        try:
+            with self.db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # For contact forms, check by phone number since they don't have emails
+                    if email_type in ['home_page', 'packages_page']:
+                        phone = parsed_data.get('phone', '').strip()
+                        if phone:
+                            cur.execute("""
+                                SELECT 1 FROM users WHERE phone_number = %s
+                                LIMIT 1
+                            """, (phone,))
+                            
+                            result = cur.fetchone() is not None
+                            if result:
+                                db_logger.info(f"Contact form lead with phone {phone} already exists - skipping")
+                            return result
+                    
+                    # For NEW M LEAD, check by email (original behavior)
+                    elif email_type == 'new_lead':
+                        email = parsed_data.get('email', '').strip()
+                        if email:
+                            cur.execute("""
+                                SELECT 1 FROM users WHERE email = %s
+                                LIMIT 1
+                            """, (email,))
+                            
+                            result = cur.fetchone() is not None
+                            if result:
+                                db_logger.info(f"NEW M LEAD with email {email} already exists - skipping")
+                            return result
+                    
+                    return False
+        except Exception as e:
+            error_logger.error(f"Error checking if lead exists: {e}")
+            return False
 
 
 class LeadSaver:
@@ -89,28 +127,35 @@ class LeadSaver:
         self.db = db_connection
     
     def save_lead(self, email_content, email_type, parsed_data):
-        """
-        Save a validated lead to the database.
-        
-        Args:
-            email_content (dict): Original email content
-            email_type (str): Type of email (new_lead, home_page, packages_page)
-            parsed_data (dict): Validated parsed data from email
-            
-        Returns:
-            str: User ID if successful, None if failed
-        """
+        """Save a validated lead to the database."""
         try:
-            from .validators import split_name
+            from .validators import split_name, is_valid_email
+            import uuid
             
             # If parsing failed or data is invalid, don't save
             if not parsed_data:
-                db_logger.warning(f"INVALID {email_type} data - not saving to database")
+                db_logger.info(f"SKIPPED {email_type} - invalid data format, not saving to database")
                 return None
             
             first_name, last_name = split_name(parsed_data.get('name', ''))
             
-            db_logger.info(f"Saving {email_type} lead: {first_name} {last_name} - {parsed_data.get('email', 'no email')}")
+            # Handle email addresses differently for different lead types
+            email_address = parsed_data.get('email', '').strip()
+            
+            if email_type in ['home_page', 'packages_page']:
+                # Contact forms don't have emails - generate unique placeholder
+                unique_id = str(uuid.uuid4())[:8]
+                email_address = f"contact_{unique_id}@bodyback-lead.local"
+                db_logger.info(f"Contact form lead - using placeholder email: {email_address}")
+                
+            elif email_type == 'new_lead':
+                # NEW M LEAD should have a real email, but handle missing ones
+                if not email_address or not is_valid_email(email_address):
+                    unique_id = str(uuid.uuid4())[:8]
+                    email_address = f"lead_{unique_id}@bodyback-lead.local"
+                    db_logger.info(f"NEW M LEAD missing email - using placeholder: {email_address}")
+            
+            db_logger.info(f"Saving {email_type} lead: {first_name} {last_name} - {email_address}")
             
             with self.db.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -120,14 +165,14 @@ class LeadSaver:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (
-                        parsed_data.get('email', ''),
+                        email_address,
                         'lead_no_password',
                         first_name,
                         last_name,
                         parsed_data.get('phone', ''),
                         parsed_data.get('location', ''),
-                        ['lead'],  # Role as lead
-                        True  # Active by default
+                        ['lead'],
+                        True
                     ))
                     
                     user_id = cur.fetchone()['id']
@@ -142,7 +187,9 @@ class LeadSaver:
                         'original_email_from': email_content['from'],
                         'original_email_date': email_content['date'],
                         'is_forward': email_content['is_forward'],
-                        'processed_at': datetime.now().isoformat()
+                        'processed_at': datetime.now().isoformat(),
+                        'has_real_email': bool(parsed_data.get('email', '').strip() and is_valid_email(parsed_data.get('email', ''))),
+                        'primary_contact_method': 'phone' if email_type in ['home_page', 'packages_page'] else 'email'
                     }
                     
                     # Insert customer record
@@ -163,14 +210,15 @@ class LeadSaver:
                     return user_id
                     
         except psycopg2.IntegrityError as e:
-            error_logger.error(f"Database integrity error (possibly duplicate email): {e}")
+            # This should now only happen for actual duplicates
+            db_logger.info(f"SKIPPED {email_type} - duplicate detected: {e}")
             return None
         except Exception as e:
-            error_logger.error(f"Error saving lead to database: {e}")
+            # These are actual system errors
+            error_logger.error(f"SYSTEM ERROR saving lead to database: {e}")
             import traceback
             error_logger.error(traceback.format_exc())
             return None
-
 
 class BodyBackDB:
     """
@@ -196,16 +244,7 @@ class BodyBackDB:
         return self.email_processor.email_already_processed(email_id)
     
     def save_lead(self, email_content, email_type):
-        """
-        Parse and save any type of lead to database.
-        
-        Args:
-            email_content (dict): Email content with id, subject, body, etc.
-            email_type (str): Type of email (new_lead, home_page, packages_page)
-            
-        Returns:
-            str: User ID if successful, None if failed or skipped
-        """
+        """Parse and save any type of lead to database."""
         try:
             # Import parsers here to avoid circular imports
             from .parsers import parse_new_lead, parse_contact_form
@@ -219,6 +258,11 @@ class BodyBackDB:
             # If parsing failed, this is expected behavior (invalid data format)
             if not parsed_data:
                 db_logger.info(f"SKIPPED {email_type} - invalid data format, not saving to database")
+                return None
+            
+            # Check for duplicates based on lead type
+            if self.email_processor.lead_already_exists(parsed_data, email_type):
+                db_logger.info(f"SKIPPED {email_type} - duplicate lead detected")
                 return None
             
             # Save the validated data
