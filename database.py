@@ -93,31 +93,91 @@ class BodyBackDB:
         
         return data
     
+    def clean_text(self, text):
+        """Clean extracted text by removing extra whitespace and formatting."""
+        if not text:
+            return ''
+        # Remove extra whitespace and newlines
+        cleaned = re.sub(r'\s+', ' ', text.strip())
+        return cleaned
+    
     def parse_contact_form(self, email_body):
-        """Parse SA Home/Packages page contact form."""
+        """Parse SA Home/Packages page contact form with improved regex patterns."""
         data = {}
         
-        # Extract name
-        name_match = re.search(r'\*Name and Surname\*\*?\s*([^\n\r\*]+)', email_body, re.IGNORECASE)
-        if name_match:
-            data['name'] = name_match.group(1).strip()
+        # Clean the email body first - remove excessive whitespace but keep structure
+        cleaned_body = re.sub(r'\n\s*\n', '\n', email_body)
         
-        # Extract phone
-        phone_match = re.search(r'\*Number \(10 digits\)\*\*?\s*([0-9]+)', email_body, re.IGNORECASE)
-        if phone_match:
-            data['phone'] = phone_match.group(1).strip()
+        # Extract name - more flexible pattern that handles HTML formatting
+        name_patterns = [
+            r'Name and Surname\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([A-Z][A-Z\s]+)',  # Pattern for your example
+            r'\*?Name and Surname\*?\s*\n+\s*([^\n]+)',  # Alternative pattern
+            r'Name and Surname\*?\s*([^\n\r]+)',  # Simple pattern
+            r'Name.*?\n+\s*([A-Z][A-Z\s]+)'  # Even more flexible
+        ]
+        
+        for pattern in name_patterns:
+            name_match = re.search(pattern, email_body, re.IGNORECASE | re.DOTALL)
+            if name_match:
+                data['name'] = self.clean_text(name_match.group(1))
+                break
+        
+        if 'name' not in data:
+            data['name'] = ''
+        
+        # Extract phone - look for 10 digit numbers
+        phone_patterns = [
+            r'Number \(10 digits\)\*?\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*(\d{10})',  # Pattern for your example
+            r'\*?Number.*?\*?\s*\n+\s*([0-9]+)',  # Alternative pattern
+            r'Number.*?(\d{10})',  # Simple 10-digit pattern
+            r'(\d{10})'  # Just find any 10-digit number
+        ]
+        
+        for pattern in phone_patterns:
+            phone_match = re.search(pattern, email_body, re.IGNORECASE | re.DOTALL)
+            if phone_match:
+                data['phone'] = self.clean_text(phone_match.group(1))
+                break
+        
+        if 'phone' not in data:
+            data['phone'] = ''
         
         # Extract location
-        location_match = re.search(r'\*Location\*\s*([^\n\r\*]+)', email_body, re.IGNORECASE)
-        if location_match:
-            data['location'] = location_match.group(1).strip()
+        location_patterns = [
+            r'Location\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+)',  # Pattern for your example
+            r'\*?Location\*?\s*\n+\s*([^\n]+)',  # Alternative pattern  
+            r'Location\*?\s*([^\n\r]+)',  # Simple pattern
+            r'Location.*?\n+\s*([A-Za-z\s]+)'  # Flexible pattern
+        ]
+        
+        for pattern in location_patterns:
+            location_match = re.search(pattern, email_body, re.IGNORECASE | re.DOTALL)
+            if location_match:
+                data['location'] = self.clean_text(location_match.group(1))
+                break
+        
+        if 'location' not in data:
+            data['location'] = ''
         
         # Extract goals/details
-        goals_match = re.search(r'\*Goals, injuries & other details\*\s*([^\n\r\*]+)', email_body, re.IGNORECASE)
-        if goals_match:
-            data['customer_data'] = goals_match.group(1).strip()
-        else:
+        goals_patterns = [
+            r'Goals, injuries & other details\s*\n.*?\n.*?\n.*?\n.*?\n.*?\n\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*Date:|$)',  # Pattern for your example
+            r'\*?Goals, injuries & other details\*?\s*\n+\s*([^\n\r]+)',  # Alternative pattern
+            r'Goals.*?details.*?\s*([^\n\r]+)',  # Simple pattern
+            r'Goals.*?\n+\s*([^Date:]+)'  # Everything until Date:
+        ]
+        
+        for pattern in goals_patterns:
+            goals_match = re.search(pattern, email_body, re.IGNORECASE | re.DOTALL)
+            if goals_match:
+                data['customer_data'] = self.clean_text(goals_match.group(1))
+                break
+        
+        if 'customer_data' not in data:
             data['customer_data'] = ''
+        
+        # Log what we extracted for debugging
+        db_logger.info(f"Extracted data: Name='{data.get('name')}', Phone='{data.get('phone')}', Location='{data.get('location')}', Data='{data.get('customer_data')}'")
         
         return data
     
