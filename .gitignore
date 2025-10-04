@@ -10,6 +10,8 @@ ENV/
 .env.local
 .env.production
 .env.staging
+# Keep the example file
+!.env.example
 
 # Credentials and Secrets
 oauth-credentials.json

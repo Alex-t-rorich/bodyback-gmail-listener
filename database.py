@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-"""
-Database module for BodyBack Gmail listener
-Handles all database operations for leads and customer inquiries
-"""
-
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -13,10 +7,8 @@ import re
 import json
 import logging
 
-# Load environment variables
 load_dotenv()
 
-# Set up database logger
 db_logger = logging.getLogger('database')
 db_handler = logging.FileHandler('logs/database.log')
 db_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
@@ -37,14 +29,12 @@ class BodyBackDB:
         db_logger.info(f"Database configured: {self.connection_params['host']}:{self.connection_params['port']}/{self.connection_params['database']}")
     
     def get_connection(self):
-        """Get database connection."""
         return psycopg2.connect(
             **self.connection_params,
             cursor_factory=RealDictCursor
         )
     
     def email_already_processed(self, email_id):
-        """Check if email has already been processed."""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -62,7 +52,6 @@ class BodyBackDB:
             return False
     
     def parse_new_lead(self, email_body):
-        """Parse NEW M LEAD email body - first 4 lines are structured."""
         lines = [line.strip() for line in email_body.strip().split('\n') if line.strip()]
         
         data = {}
@@ -88,7 +77,6 @@ class BodyBackDB:
         return data
     
     def clean_text(self, text):
-        """Clean extracted text by removing extra whitespace and formatting."""
         if not text:
             return ''
 
@@ -96,7 +84,6 @@ class BodyBackDB:
         return cleaned
     
     def parse_contact_form(self, email_body):
-        """Parse SA Home/Packages page contact form with improved regex patterns."""
         data = {}
         
         cleaned_body = re.sub(r'\n\s*\n', '\n', email_body)
@@ -170,7 +157,6 @@ class BodyBackDB:
         return data
     
     def split_name(self, full_name):
-        """Split full name into first and last name."""
         if not full_name:
             return '', ''
         
@@ -181,37 +167,51 @@ class BodyBackDB:
         return first_name, last_name
     
     def save_lead(self, email_content, email_type):
-        """Save any type of lead to database."""
         try:
             if email_type == 'new_lead':
                 parsed_data = self.parse_new_lead(email_content['body'])
             else:
                 parsed_data = self.parse_contact_form(email_content['body'])
-            
+
             first_name, last_name = self.split_name(parsed_data.get('name', ''))
-            
+
             db_logger.info(f"Saving {email_type} lead: {first_name} {last_name} - {parsed_data.get('email', 'no email')}")
-            
+
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
+                    # First, get the Customer role ID
+                    cur.execute("SELECT id FROM roles WHERE name = 'Customer'")
+                    role_result = cur.fetchone()
+                    if not role_result:
+                        error_logger.error("Customer role not found in database")
+                        return None
+                    customer_role_id = role_result['id']
+
+                    # Generate a unique email if none provided (to avoid constraint violations)
+                    email = parsed_data.get('email', '')
+                    if not email:
+                        # Generate a placeholder email based on gmail message ID
+                        email = f"lead_{email_content['id']}@placeholder.com"
+
+                    # Insert into users table with new schema (UUID id, role_id instead of roles array)
                     cur.execute("""
-                        INSERT INTO users (email, password_hash, first_name, last_name, phone_number, location, roles, active)
+                        INSERT INTO users (email, password_hash, first_name, last_name, phone_number, location, role_id, active)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (
-                        parsed_data.get('email', ''),
+                        email,
                         'lead_no_password',
                         first_name,
                         last_name,
                         parsed_data.get('phone', ''),
                         parsed_data.get('location', ''),
-                        ['Customer'],
+                        customer_role_id,
                         False
                     ))
-                    
+
                     user_id = cur.fetchone()['id']
                     db_logger.info(f"Created user with ID: {user_id}")
-                    
+
                     profile_data = {
                         'gmail_id': email_content['id'],
                         'source': email_type,
@@ -222,7 +222,8 @@ class BodyBackDB:
                         'is_forward': email_content['is_forward'],
                         'processed_at': datetime.now().isoformat()
                     }
-                    
+
+                    # Insert into customers table (user_id is the primary key)
                     cur.execute("""
                         INSERT INTO customers (user_id, profile_data)
                         VALUES (%s, %s)
@@ -231,14 +232,14 @@ class BodyBackDB:
                         user_id,
                         json.dumps(profile_data)
                     ))
-                    
+
                     customer_user_id = cur.fetchone()['user_id']
                     db_logger.info(f"Created customer record for user ID: {customer_user_id}")
-                    
+
                     conn.commit()
                     db_logger.info(f"✅ {email_type} lead saved successfully! User ID: {user_id}")
                     return user_id
-                    
+
         except psycopg2.IntegrityError as e:
             error_logger.error(f"Database integrity error (possibly duplicate email): {e}")
             return None
@@ -249,7 +250,6 @@ class BodyBackDB:
             return None
     
     def test_connection(self):
-        """Test database connection."""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:

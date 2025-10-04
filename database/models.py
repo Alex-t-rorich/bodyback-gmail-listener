@@ -6,15 +6,12 @@ from datetime import datetime
 import json
 import logging
 
-# Load environment variables
 load_dotenv()
 
-# Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 
-# Set up database logger
 db_logger = logging.getLogger('database')
-if not db_logger.handlers:  # Avoid duplicate handlers
+if not db_logger.handlers:
     db_handler = logging.FileHandler('logs/database.log', encoding='utf-8')
     db_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     db_logger.addHandler(db_handler)
@@ -24,8 +21,6 @@ error_logger = logging.getLogger('errors')
 
 
 class DatabaseConnection:
-    """Handles database connection management."""
-    
     def __init__(self):
         self.connection_params = {
             'host': os.getenv('DB_HOST'),
@@ -37,14 +32,12 @@ class DatabaseConnection:
         db_logger.info(f"Database configured: {self.connection_params['host']}:{self.connection_params['port']}/{self.connection_params['database']}")
     
     def get_connection(self):
-        """Get database connection."""
         return psycopg2.connect(
             **self.connection_params,
             cursor_factory=RealDictCursor
         )
     
     def test_connection(self):
-        """Test database connection."""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -58,13 +51,10 @@ class DatabaseConnection:
 
 
 class EmailProcessor:
-    """Handles email processing and duplicate checking."""
-    
     def __init__(self, db_connection):
         self.db = db_connection
     
     def email_already_processed(self, email_id):
-        """Check if email has already been processed."""
         try:
             with self.db.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -82,11 +72,9 @@ class EmailProcessor:
             return False
     
     def lead_already_exists(self, parsed_data, email_type):
-        """Check if lead already exists based on phone number for contact forms."""
         try:
             with self.db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # For contact forms, check by phone number since they don't have emails
                     if email_type in ['home_page', 'packages_page']:
                         phone = parsed_data.get('phone', '').strip()
                         if phone:
@@ -100,7 +88,6 @@ class EmailProcessor:
                                 db_logger.info(f"Contact form lead with phone {phone} already exists - skipping")
                             return result
                     
-                    # For NEW M LEAD, check by email (original behavior)
                     elif email_type == 'new_lead':
                         email = parsed_data.get('email', '').strip()
                         if email:
@@ -121,35 +108,28 @@ class EmailProcessor:
 
 
 class LeadSaver:
-    """Handles saving leads to the database."""
-    
     def __init__(self, db_connection):
         self.db = db_connection
     
     def save_lead(self, email_content, email_type, parsed_data):
-        """Save a validated lead to the database."""
         try:
             from .validators import split_name, is_valid_email
             import uuid
             
-            # If parsing failed or data is invalid, don't save
             if not parsed_data:
                 db_logger.info(f"SKIPPED {email_type} - invalid data format, not saving to database")
                 return None
             
             first_name, last_name = split_name(parsed_data.get('name', ''))
             
-            # Handle email addresses differently for different lead types
             email_address = parsed_data.get('email', '').strip()
             
             if email_type in ['home_page', 'packages_page']:
-                # Contact forms don't have emails - generate unique placeholder
                 unique_id = str(uuid.uuid4())[:8]
                 email_address = f"contact_{unique_id}@bodyback-lead.local"
                 db_logger.info(f"Contact form lead - using placeholder email: {email_address}")
                 
             elif email_type == 'new_lead':
-                # NEW M LEAD should have a real email, but handle missing ones
                 if not email_address or not is_valid_email(email_address):
                     unique_id = str(uuid.uuid4())[:8]
                     email_address = f"lead_{unique_id}@bodyback-lead.local"
@@ -159,7 +139,6 @@ class LeadSaver:
             
             with self.db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Insert user
                     cur.execute("""
                         INSERT INTO users (email, password_hash, first_name, last_name, phone_number, location, roles, active)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -178,7 +157,6 @@ class LeadSaver:
                     user_id = cur.fetchone()['id']
                     db_logger.info(f"Created user with ID: {user_id}")
                     
-                    # Create profile data
                     profile_data = {
                         'gmail_id': email_content['id'],
                         'source': email_type,
@@ -192,7 +170,6 @@ class LeadSaver:
                         'primary_contact_method': 'phone' if email_type in ['home_page', 'packages_page'] else 'email'
                     }
                     
-                    # Insert customer record
                     cur.execute("""
                         INSERT INTO customers (user_id, profile_data)
                         VALUES (%s, %s)
@@ -210,62 +187,46 @@ class LeadSaver:
                     return user_id
                     
         except psycopg2.IntegrityError as e:
-            # This should now only happen for actual duplicates
             db_logger.info(f"SKIPPED {email_type} - duplicate detected: {e}")
             return None
         except Exception as e:
-            # These are actual system errors
             error_logger.error(f"SYSTEM ERROR saving lead to database: {e}")
             import traceback
             error_logger.error(traceback.format_exc())
             return None
 
 class BodyBackDB:
-    """
-    Main database interface for BodyBack Gmail listener.
-    Combines all database operations into a single interface.
-    """
-    
     def __init__(self):
         self.connection = DatabaseConnection()
         self.email_processor = EmailProcessor(self.connection)
         self.lead_saver = LeadSaver(self.connection)
     
     def get_connection(self):
-        """Get database connection."""
         return self.connection.get_connection()
     
     def test_connection(self):
-        """Test database connection."""
         return self.connection.test_connection()
     
     def email_already_processed(self, email_id):
-        """Check if email has already been processed."""
         return self.email_processor.email_already_processed(email_id)
     
     def save_lead(self, email_content, email_type):
-        """Parse and save any type of lead to database."""
         try:
-            # Import parsers here to avoid circular imports
             from .parsers import parse_new_lead, parse_contact_form
             
-            # Parse the email content based on type
             if email_type == 'new_lead':
                 parsed_data = parse_new_lead(email_content['body'])
             else:
                 parsed_data = parse_contact_form(email_content['body'])
             
-            # If parsing failed, this is expected behavior (invalid data format)
             if not parsed_data:
                 db_logger.info(f"SKIPPED {email_type} - invalid data format, not saving to database")
                 return None
             
-            # Check for duplicates based on lead type
             if self.email_processor.lead_already_exists(parsed_data, email_type):
                 db_logger.info(f"SKIPPED {email_type} - duplicate lead detected")
                 return None
             
-            # Save the validated data
             result = self.lead_saver.save_lead(email_content, email_type, parsed_data)
             
             if result:
@@ -274,7 +235,6 @@ class BodyBackDB:
             return result
             
         except Exception as e:
-            # These are actual system errors that need attention
             error_logger.error(f"SYSTEM ERROR in save_lead: {e}")
             import traceback
             error_logger.error(traceback.format_exc())
